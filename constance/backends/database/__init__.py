@@ -1,12 +1,6 @@
 from django.core.cache import caches
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.exceptions import ImproperlyConfigured
-from django.db import (
-    IntegrityError,
-    OperationalError,
-    ProgrammingError,
-    transaction,
-)
 from django.db.models.signals import post_save
 
 from .. import Backend
@@ -59,12 +53,9 @@ class DatabaseBackend(Backend):
         if not keys:
             return
         keys = {self.add_prefix(key): key for key in keys}
-        try:
-            stored = self._model._default_manager.filter(key__in=keys)
-            for const in stored:
-                yield keys[const.key], const.value
-        except (OperationalError, ProgrammingError):
-            pass
+        stored = self._model._default_manager.filter(key__in=keys)
+        for const in stored:
+            yield keys[const.key], const.value
 
     def get(self, key):
         key = self.add_prefix(key)
@@ -78,7 +69,7 @@ class DatabaseBackend(Backend):
         if value is None:
             try:
                 value = self._model._default_manager.get(key=key).value
-            except (OperationalError, ProgrammingError, self._model.DoesNotExist):
+            except self._model.DoesNotExist:
                 pass
             else:
                 if self._cache:
@@ -87,25 +78,8 @@ class DatabaseBackend(Backend):
 
     def set(self, key, value):
         key = self.add_prefix(key)
-        created = False
         queryset = self._model._default_manager.all()
-        # Set _for_write attribute as get_or_create method does
-        # https://github.com/django/django/blob/2.2.11/django/db/models/query.py#L536
-        queryset._for_write = True
-
-        try:
-            constance = queryset.get(key=key)
-        except (OperationalError, ProgrammingError):
-            # database is not created, noop
-            return
-        except self._model.DoesNotExist:
-            try:
-                with transaction.atomic(using=queryset.db):
-                    queryset.create(key=key, value=value)
-                created = True
-            except IntegrityError as error:
-                # Allow concurrent writes
-                constance = queryset.get(key=key)
+        constance, created = queryset.get_or_create(key=key, defaults=dict(value=value))
 
         if not created:
             old_value = constance.value
